@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Streaming Video in 12 Languages</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            background-color: #f7f9fc;
+            color: #333;
+        }
+
+        header {
+            width: 100%;
+            padding: 20px;
+            background-color: #0056b3;
+            color: #fff;
+            text-align: center;
+            font-size: 1.5rem;
+            font-weight: bold;
+            box-shadow: 0px 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        .container {
+            display: flex;
+            flex-direction: row;
+            flex-grow: 1;
+            width: 100%;
+        }
+
+        /* Video Section */
+        .video-section, .output-section {
+            width: 50%;
+            background-color: #1c1c1c;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            border: 5px solid #000000;
+            position: relative;
+        }
+
+        .video-section h3, .output-section h3 {
+            margin-bottom: 20px;
+        }
+
+        .video-section video, .output-section video {
+            width: 100%;
+            height: auto;
+            object-fit: contain;
+        }
+
+        /* Loading Spinner */
+        .spinner {
+            display: none; /* Hidden by default */
+            position: absolute;
+            width: 50px;
+            height: 50px;
+            border: 8px solid #f3f3f3; /* Light grey */
+            border-top: 8px solid #1c982b; /* Blue */
+            border-radius: 50%;
+            animation: spin 2s linear infinite;
+            z-index: 1000; /* Ensure it's above other elements */
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Bottom form */
+        .form-container {
+            width: 100%;
+            padding: 20px;
+            background: linear-gradient(90deg, #007bff, #28a745);
+            box-shadow: 0px -2px 5px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .form-container h2 {
+            color: #fff;
+            margin-bottom: 10px;
+            font-size: 1.2rem;
+        }
+
+        .form-container form {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+            max-width: 600px;
+        }
+
+        .form-container input, 
+        .form-container select, 
+        .form-container button {
+            padding: 10px;
+            margin-bottom: 10px;
+            width: 100%;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+
+        .form-container button {
+            background: #fff;
+            color: #007bff;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .form-container button:hover {
+            background: #f4f4f9;
+        }
+    </style>
+</head>
+<body>
+    <header>Streaming Video in 12 Languages</header>
+
+    <div class="container">
+        <!-- Left side: Uploaded video -->
+        <div class="video-section">
+            <h3>Original Video</h3>
+            <div class="spinner" id="original-spinner"></div>
+            {% if uploaded_video_url %}
+                <video id="original-video" controls>
+                    <source src="{{ uploaded_video_url }}" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            {% else %}
+                <p>No video uploaded yet.</p>
+            {% endif %}
+        </div>
+
+        <!-- Right side: Processed video -->
+        <div class="output-section">
+            <h3>Translated Video</h3>
+            <div class="spinner" id="translated-spinner"></div>
+            {% if video_url %}
+                <video id="translated-video" controls>
+                    <source src="{{ video_url }}" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            {% else %}
+                <p>No processed video available yet.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Bottom: Upload form -->
+    <div class="form-container">
+        <h2>Upload Your Video and Select Target Language</h2>
+        <form action="/process_video" method="post" enctype="multipart/form-data">
+            <input type="file" name="video_file" required>
+            <select name="target_language" required>
+                <option value="en">English</option>
+                <option value="fr">French</option>
+                <option value="es">Spanish</option>
+                <option value="de">German</option>
+                <option value="zh-cn">Chinese</option>
+                <option value="hi">Hindi</option>
+                <option value="af">Afrikaans</option>
+                <option value="it">Italian</option>
+                <option value="ja">Japanese</option>
+                <option value="pt">Portuguese</option>
+                <option value="ru">Russian</option>
+                <option value="sv">Swedish</option>
+                <option value="th">Thai</option>
+            </select>
+            <button type="submit">Upload and Process</button>
+        </form>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const form = document.querySelector('form');
+            const originalSpinner = document.getElementById('original-spinner');
+            const translatedSpinner = document.getElementById('translated-spinner');
+    
+            // Show spinner during form submission
+            form.addEventListener('submit', function () {
+                // Show the spinners
+                originalSpinner.style.display = 'block';
+                translatedSpinner.style.display = 'block';
+    
+                // Optionally disable the submit button to prevent multiple submissions
+                const submitButton = form.querySelector('button[type="submit"]');
+                submitButton.disabled = true;
+                submitButton.innerText = 'Processing...';
+            });
+    
+            // Hide spinner when the video loads
+            const originalVideo = document.getElementById('original-video');
+            const translatedVideo = document.getElementById('translated-video');
+    
+            if (originalVideo) {
+                originalVideo.addEventListener('loadeddata', function () {
+                    originalSpinner.style.display = 'none';
+                });
+            }
+    
+            if (translatedVideo) {
+                translatedVideo.addEventListener('loadeddata', function () {
+                    translatedSpinner.style.display = 'none';
+                });
+            }
+        });
+    </script>
+
+</body>
+</html>
