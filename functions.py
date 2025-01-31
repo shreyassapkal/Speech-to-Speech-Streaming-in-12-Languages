@@ -1,21 +1,18 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts.prompt import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from moviepy import VideoFileClip, AudioFileClip, concatenate_audioclips
 from dotenv import load_dotenv
-load_dotenv()
 import os
-import moviepy as mp
-import whisper  
+import whisper
 import subprocess
-from langdetect import detect
-from gtts import gTTS
 from pydub import AudioSegment
-
+import json
+import edge_tts
+import asyncio
+load_dotenv()
 
 def extract_audio(video_path, audio_output_path):
-    
-    try : 
+    try:
         command = [
             "ffmpeg",
             "-i", video_path,
@@ -28,150 +25,274 @@ def extract_audio(video_path, audio_output_path):
     except subprocess.CalledProcessError as e:
         print(f"An error occurred: {e}")
 
-
-def transcribe_audio(audio_path, model_size="base"):
+def transcribe_audio_with_timestamps(audio_path, model_size="base"):
+    """
+    Transcribe audio and return both text and timestamp information
+    """
     try:
         model = whisper.load_model(model_size)
         result = model.transcribe(audio_path)
-        return result["text"] 
 
+        transcription_file = "static/outputs/transcribed_text.txt"
+        if "text" in result and result["text"]:
+            with open(transcription_file, "w", encoding='utf-8') as f:
+                f.write(result["text"])  # Extract text before writing
+            print(f"Transcription saved to {transcription_file}")
+        else:
+            print("Transcription failed.")
+
+        return result  # Returns full result including segments with timestamps
     except Exception as e:
         print(f"Error during transcription: {e}")
         return None
 
-def translate_to_text(transcription_text, translated_text_path, target_language):
-    target_lang = target_language
-    prompt = """"
-    Trasnlate the following text file to {target_lang}
-    Text in File : {input_text}
-    No need for further explanation just give translation to the given te   xt
-    Translation :
+def generate_srt_from_segments(segments, translated_text=None):
     """
+    Generate SRT format subtitles from whisper segments
+    """
+    srt_content = ""
+    for i, segment in enumerate(segments, 1):
+        start = format_timestamp(segment['start'])
+        end = format_timestamp(segment['end'])
+        text = segment['text'].strip()
+        
+        srt_content += f"{i}\n{start} --> {end}\n{text}\n\n"
     
-    llm = ChatGoogleGenerativeAI(model = "gemini-1.5-flash")
+    return srt_content
 
-    prompt_template = PromptTemplate(template = prompt, input_variables = [ "target_lang", "input_text"])
+def format_timestamp(seconds):
+    """
+    Convert seconds to SRT timestamp format (HH:MM:SS,mmm)
+    """
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    seconds = seconds % 60
+    milliseconds = int((seconds % 1) * 1000)
+    seconds = int(seconds)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+
+def translate_to_text(transcription_result, translated_text_path, target_language):
+    target_lang = target_language
+    # Modified prompt to preserve timing information
+    prompt = """Translate these text segments to {target_lang} EXACTLY AS IS:
+    - Maintain EXACT same number of lines
+    - Preserve ALL punctuation and timing markers
+    - NO additional text or explanations
+    - ONE translated segment per line
+    - STRICT FORMAT: [translation] (NO numbering)
     
+    Input Segments:
+    {input_text}
+    
+    Translations (ONLY TRANSLATIONS, ONE PER LINE):"""
+    
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash")
+    prompt_template = PromptTemplate(template=prompt, input_variables=["target_lang", "input_text"])
     chain = prompt_template | llm | StrOutputParser()
-
-    try :
-        with open(transcription_text, 'r', encoding='utf-8') as file:
-            input_text = file.read().strip()
-    except FileNotFoundError:
-        print("File not found")
     
-    output = chain.invoke({"target_lang": target_lang, "input_text": input_text})
+    # Extract segments and create input text
+    segments_text = "\n".join([segment['text'] for segment in transcription_result['segments']])
     
+    output = chain.invoke({"target_lang": target_lang, "input_text": segments_text})
+    
+    # Save translated text
     with open(translated_text_path, "w", encoding='utf-8') as file:
         file.write(output)
+    
+    return output.split('\n')  # Return translated segments
 
-
-def text_to_speech(translated_text_path, language):
-
+async def generate_speech(text, language, output_file):
     try:
-
-        gtts_language_map = {
-            "en": "English",  # English
-            "fr": "French",  # French
-            "es": "Spanish",  # Spanish
-            "de": "German",  # German
-            "zh-cn": "Chinese",  # Chinese (Simplified)
-            "hi": "Hindi",  # Hindi
+        voice_map = {
+            "en": "en-US-AriaNeural",      # More expressive female (great inflection)
+            "fr": "fr-FR-BrigitteNeural",  # Warmer French tone
+            "es": "es-ES-AlvaroNeural",    # Natural male voice with good pacing
+            "de": "de-DE-AmalaNeural",     # Softer German articulation
+            "zh-cn": "zh-CN-YunyangNeural",# More emotive Chinese voice
+            "hi": "hi-IN-MadhurNeural",    # Natural male Hindi voice
+            "af": "af-ZA-WillemNeural",    # Smoother Afrikaans delivery
+            "it": "it-IT-DiegoNeural",     # Expressive Italian male
+            "ja": "ja-JP-KeitaNeural",     # Natural Japanese male
+            "pt": "pt-BR-AntonioNeural",   # Friendly Brazilian Portuguese
+            "ru": "ru-RU-DmitryNeural",    # Warm Russian baritone
+            "sv": "sv-SE-MattiasNeural",   # Clear Swedish articulation
+            "th": "th-TH-NiwatNeural",     # Natural Thai male
         }
 
-        gtts_lang = gtts_language_map.get(language)
-        if not gtts_lang:
-            raise ValueError(f"Unsupported language for gTTS: {language}")
+        voice = voice_map.get(language)
+        if not voice:
+            raise ValueError(f"Unsupported language for Edge-TTS: {language}")
 
+        tts = edge_tts.Communicate(text, voice)
+        await tts.save(output_file)
+
+        if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
+            raise ValueError("Edge-TTS failed to generate a valid audio file.")
+
+        print(f"Audio file saved as {output_file}")
+    except Exception as e:
+        print(f"Error in text_to_speech: {e}")
+        raise
+
+def text_to_speech(translated_text_path, language):
+    try:
         # Read the translated text file
         with open(translated_text_path, 'r', encoding='utf-8') as file:
             text = file.read()
             print(f"Text for TTS: {text}")  # Debug: Check text for TTS
 
-        # Generate speech using gTTS
-        tts = gTTS(text=text, lang=language)
         output_file = os.path.join("static/outputs", "translated_audio.mp3")
-        tts.save(output_file)
+        asyncio.run(generate_speech(text, language, output_file))
 
-        # Validate that the audio file was created
-        if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
-            raise ValueError("gTTS failed to generate a valid audio file.")
-
-        print(f"Audio file saved as {output_file}")  # Debug: Confirm file saved
     except Exception as e:
         print(f"Error in text_to_speech: {e}")
         raise
 
+def create_subtitled_video(video_path, srt_path, output_path):
+    """
+    Burn subtitles into the video using FFmpeg with improved sync settings
+    """
+    try:
+        # Enhanced FFmpeg command with subtitle sync settings
+        command = [
+            'ffmpeg',
+            '-i', video_path,
+            '-vf', f'subtitles={srt_path}:force_style=\'FontSize=24,Alignment=2,MarginV=25\'',
+            '-c:a', 'copy',
+            '-vsync', 'cfr',  # Constant frame rate for better sync
+            '-max_muxing_queue_size', '1024',  # Prevent muxing errors
+            output_path
+        ]
+        subprocess.run(command, check=True)
+        print(f"Successfully created subtitled video at {output_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error creating subtitled video: {e}")
 
+def integrate_audio_and_subtitles(speech_audio_path, video_path, srt_path, final_video_path):
+    """
+    Integrate translated audio and synchronized subtitles with the video
+    """
+    try:
+        # Step 1: Get video duration
+        probe_cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            video_path
+        ]
+        video_duration = float(subprocess.run(probe_cmd, capture_output=True, text=True).stdout.strip())
 
-from pydub import AudioSegment
-import subprocess
+        # Step 2: Load and adjust audio duration
+        audio = AudioSegment.from_file(speech_audio_path)
+        audio_duration = len(audio) / 1000.0  # Convert to seconds
 
-def integrate_audio_to_video(speech_audio_path, video_path, final_video_path):
+        # Step 3: Create temp audio with matched duration
+        if audio_duration != video_duration:
+            # Adjust audio speed to match video duration
+            speed_factor = audio_duration / video_duration
+            if speed_factor > 1:
+                # Slow down audio
+                adjusted_audio = audio._spawn(audio.raw_data, overrides={
+                    "frame_rate": int(audio.frame_rate * speed_factor)
+                })
+            else:
+                # Speed up audio
+                adjusted_audio = audio._spawn(audio.raw_data, overrides={
+                    "frame_rate": int(audio.frame_rate / speed_factor)
+                })
+            adjusted_audio = adjusted_audio.set_frame_rate(audio.frame_rate)
+        else:
+            adjusted_audio = audio
+
+        # Save temporary adjusted audio
+        temp_audio_path = "temp_adjusted_audio.wav"
+        adjusted_audio.export(temp_audio_path, format="wav")
+
+        # Step 4: Create subtitled video with timing adjustments
+        temp_subtitled_video = "temp_subtitled_video.mp4"
+        subtitle_command = [
+            'ffmpeg',
+            '-i', video_path,
+            '-vf', f'subtitles={srt_path}:force_style=\'FontSize=24,Alignment=2,MarginV=25\'',
+            '-c:a', 'copy',
+            '-vsync', 'cfr',
+            temp_subtitled_video
+        ]
+        subprocess.run(subtitle_command, check=True)
+
+        # Step 5: Combine everything with precise timing
+        final_command = [
+            'ffmpeg',
+            '-i', temp_subtitled_video,
+            '-i', temp_audio_path,
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-map', '0:v:0',
+            '-map', '1:a:0',
+            '-async', '1',  # Audio sync adjustment
+            '-vsync', 'cfr',
+            '-max_muxing_queue_size', '1024',
+            final_video_path
+        ]
+        subprocess.run(final_command, check=True)
+
+        # Cleanup
+        if os.path.exists(temp_subtitled_video):
+            os.remove(temp_subtitled_video)
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+
+        print(f"Successfully created final video with synchronized audio and subtitles")
+    except subprocess.CalledProcessError as e:
+        print(f"Error in final video creation: {e}")
+        # Cleanup on error
+        if os.path.exists(temp_subtitled_video):
+            os.remove(temp_subtitled_video)
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+
+def process_video_with_subtitles(video_path, target_language):
+    """
+    Main function to process video with synchronized subtitles and translated audio
+    """
+    # Extract audio
     
-    command = ['ffmpeg', '-i', video_path]
-    result = subprocess.run(command, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-    duration=0
-    # Find the duration in the FFmpeg output
-    for line in result.stderr.splitlines():
-        if "Duration" in line:
-            duration_str = line.split("Duration:")[1].split(",")[0].strip()
-            hours, minutes, seconds = map(float, duration_str.split(":"))
-            duration =  hours * 3600 + minutes * 60 + seconds
-
-    # Load the audio using Pydub
-    audio = AudioSegment.from_file(speech_audio_path)
-
-    # Extract video and audio durations
-    video_duration = duration
-    audio_duration = len(audio) / 1000.0  # Convert from milliseconds to seconds
-
-    # Adjust the audio duration by trimming or padding it
-    if audio_duration < video_duration:
-        # Pad the audio with silence if it's shorter than the video
-        silence = AudioSegment.silent(duration=(video_duration - audio_duration) * 1000)
-        audio = audio + silence
-    elif audio_duration > video_duration:
-        # Trim the audio if it's longer than the video
-        audio = audio[:int(video_duration * 1000)]  # Keep only as much audio as the video length
-
-    # Export the adjusted audio to a temporary file in WAV format (FFmpeg works well with WAV)
-    temp_audio_path = "temp_audio.wav"
-    audio.export(temp_audio_path, format="wav")
-
-    # Use FFmpeg to integrate the audio with the video and synchronize
-    command = [
-        'ffmpeg',
-        '-i', video_path,          # Input video file
-        '-i', temp_audio_path,     # Input audio file
-        '-c:v', 'copy',            # Copy the video codec
-        '-c:a', 'aac',             # Use AAC codec for audio
-        '-strict', 'experimental', # Allow experimental features (for audio codec)
-        '-map', '0:v:0',           # Map the video stream
-        '-map', '1:a:0',           # Map the audio stream
-        '-shortest',               # Ensure the output video duration matches the shortest stream
-        final_video_path           # Output video path
-    ]
+    audio_path = "static/outputs/extracted_audio.mp3"
+    extract_audio(video_path, audio_path)
     
-    # Run the command
-    subprocess.run(command)
-
-    # Optionally, delete the temporary audio file
-    subprocess.run(["rm", temp_audio_path])
-
-    print(f"Video with integrated audio (synchronized) saved at {final_video_path}")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    # Transcribe with timestamps
+    transcription_result = transcribe_audio_with_timestamps(audio_path)
+    
+    # Save original subtitles
+    original_srt = generate_srt_from_segments(transcription_result['segments'])
+    with open("static/outputs/original.srt", "w", encoding='utf-8') as f:
+        f.write(original_srt)
+    
+    # Translate text while preserving segment structure
+    translated_segments = translate_to_text(transcription_result, 
+                                         "static/outputs/translated_text.txt",
+                                         target_language)
+    
+    # Generate translated audio
+    text_to_speech("static/outputs/translated_text.txt", target_language)
+    
+    # Create translated SRT file using original timing with translated text
+    translated_srt_content = ""
+    for i, (segment, translated_text) in enumerate(zip(transcription_result['segments'], translated_segments), 1):
+        start = format_timestamp(segment['start'])
+        end = format_timestamp(segment['end'])
+        translated_srt_content += f"{i}\n{start} --> {end}\n{translated_text.strip()}\n\n"
+    
+    with open("static/outputs/translated.srt", "w", encoding='utf-8') as f:
+        f.write(translated_srt_content)
+    
+    # Integrate everything together
+    integrate_audio_and_subtitles(
+        "static/outputs/translated_audio.mp3",
+        video_path,
+        "static/outputs/translated.srt",
+        "static/outputs/final_video.mp4"
+    )
